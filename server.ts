@@ -6,6 +6,7 @@ import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import { fileURLToPath } from "url";
 import cookieSession from "cookie-session";
+import axios from "axios";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,7 +34,7 @@ async function startServer() {
   // Enhanced CORS for mobile app compatibility
   app.use(cors({
     origin: (origin, callback) => {
-      // Allow all origins for mobile app compatibility
+      // Allow all origins with credentials: true
       callback(null, true);
     },
     credentials: true,
@@ -47,7 +48,7 @@ async function startServer() {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // Configure cookie-session for cross-origin iframe compatibility
+  // Configure cookie-session for cross-origin iframe/mobile compatibility
   app.use(cookieSession({
     name: 'session',
     keys: [process.env.SESSION_KEY || 'drillmaster-secret-key'],
@@ -65,6 +66,7 @@ async function startServer() {
       req.session.user = { id: "judge_1", role: "judge" };
     }
     
+    // Always return {authenticated: true} as JSON
     res.json({ 
       authenticated: true, 
       user: { id: "judge_1", role: "judge" },
@@ -75,7 +77,6 @@ async function startServer() {
   // Logging middleware to help debug incoming requests from the mobile app
   app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    console.log("Headers:", JSON.stringify(req.headers, null, 2));
     if (Object.keys(req.body).length > 0) {
       console.log("Body:", JSON.stringify(req.body, null, 2));
     }
@@ -83,20 +84,64 @@ async function startServer() {
   });
 
   // --- API Routes ---
-  app.get("/", (req, res, next) => {
-    const userAgent = req.headers["user-agent"] || "";
-    const isBrowser = userAgent.includes("Mozilla") || userAgent.includes("Chrome") || userAgent.includes("Safari");
-    const wantsJson = req.headers.accept?.includes("application/json") || req.headers["x-requested-with"];
-
-    // If it's not a browser, or it specifically asks for JSON, return JSON
-    if (wantsJson || !isBrowser) {
-      return res.json({ 
-        status: "online", 
-        message: "DrillMaster Scoring Server API",
-        endpoints: ["/api/status", "/api/score", "/api/competition/:pin"]
-      });
+  
+  // Proxy endpoint for cross-origin requests from the mobile app
+  app.all("/api/proxy", async (req, res) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl) {
+      return res.status(400).json({ error: "Missing target URL" });
     }
-    next();
+
+    console.log(`[PROXY] ${req.method} ${targetUrl}`);
+
+    try {
+      const response = await axios({
+        method: req.method,
+        url: targetUrl,
+        data: req.body,
+        headers: {
+          ...req.headers,
+          host: new URL(targetUrl).host,
+          // Forward Authorization and Cookie headers
+          "Authorization": req.headers["authorization"],
+          "Cookie": req.headers["cookie"],
+        },
+        validateStatus: () => true, // Don't throw on error statuses
+        responseType: 'arraybuffer', // Get raw data first
+      });
+
+      console.log(`[PROXY] Response: ${response.status}`);
+
+      // Pass Set-Cookie headers from the upstream response back to the client
+      if (response.headers["set-cookie"]) {
+        res.setHeader("Set-Cookie", response.headers["set-cookie"]);
+      }
+
+      const contentType = response.headers["content-type"] || "";
+      
+      // If the upstream returns HTML (auth page), return a clean JSON error
+      if (contentType.includes("text/html")) {
+        return res.status(401).json({ error: "AUTH_REQUIRED", isAISAuth: true });
+      }
+
+      // When the upstream returns JSON, parse and re-serialize it cleanly
+      if (contentType.includes("application/json")) {
+        try {
+          const json = JSON.parse(Buffer.from(response.data).toString());
+          return res.json(json);
+        } catch (e) {
+          console.error("[PROXY] JSON parse error:", e);
+        }
+      }
+
+      // Otherwise pass through
+      res.set("Content-Type", contentType);
+      return res.send(response.data);
+
+    } catch (error) {
+      console.error("[PROXY] Error:", error);
+      return res.status(500).json({ error: "Proxy request failed", details: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   app.get("/api/health", (req, res) => {
@@ -113,8 +158,62 @@ async function startServer() {
     });
   });
 
+  // Debug endpoint for mobile app verification
+  app.get("/api/debug", async (req, res) => {
+    let firestoreConnected = false;
+    let firestoreError = null;
+    
+    try {
+      // Test read from Firestore
+      await getDb().collection("competitions").limit(1).get();
+      firestoreConnected = true;
+    } catch (e) {
+      firestoreError = e instanceof Error ? e.message : String(e);
+    }
+
+    // Extract registered routes
+    const routes: string[] = [];
+    app._router.stack.forEach((middleware: any) => {
+      if (middleware.route) {
+        // Routes registered directly on the app
+        const methods = Object.keys(middleware.route.methods).join(",").toUpperCase();
+        routes.push(`${methods} ${middleware.route.path}`);
+      } else if (middleware.name === "router") {
+        // Routes registered via express.Router()
+        middleware.handle.stack.forEach((handler: any) => {
+          if (handler.route) {
+            const methods = Object.keys(handler.route.methods).join(",").toUpperCase();
+            routes.push(`${methods} ${handler.route.path}`);
+          }
+        });
+      }
+    });
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      uptime: `${Math.floor(process.uptime())} seconds`,
+      firestore: {
+        connected: firestoreConnected,
+        error: firestoreError
+      },
+      cors: {
+        origin: "* (all)",
+        credentials: true,
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+      },
+      session: {
+        active: !!req.session,
+        config: {
+          name: "session",
+          secure: true,
+          sameSite: "none"
+        }
+      },
+      routes: routes.sort()
+    });
+  });
+
   // Fetch competition data by PIN
-  // This allows the mobile app to download the teams and commands
   app.get("/api/competition/:pin", async (req, res) => {
     try {
       const { pin } = req.params;
@@ -124,14 +223,21 @@ async function startServer() {
         return res.status(404).json({ error: "Competition not found" });
       }
 
-      const compData = snapshot.docs[0].data();
-      res.json({
-        id: snapshot.docs[0].id,
+      const doc = snapshot.docs[0];
+      const compData = doc.data();
+      
+      // Return data that exactly matches the Competition type
+      const response = {
+        id: doc.id,
         name: compData.name,
         date: compData.date,
+        pin: compData.pin,
         teams: compData.teams || [],
         events: compData.events || []
-      });
+      };
+
+      console.log(`[API] Returning competition data for PIN ${pin}:`, JSON.stringify(response, null, 2));
+      res.json(response);
     } catch (error) {
       console.error("Error fetching competition:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -139,17 +245,14 @@ async function startServer() {
   });
 
   // Scoring submission endpoint
-  // This handles POST requests from mobile apps
   app.post(["/api/score", "/submit", "/api/submit"], async (req, res) => {
     try {
       const scoreData = req.body;
       
-      // Basic validation
       if (!scoreData) {
         return res.status(400).json({ error: "No data provided" });
       }
 
-      // Save to Firestore
       const docRef = await getDb().collection("submissions").add({
         ...scoreData,
         source: "mobile_app",
@@ -170,6 +273,14 @@ async function startServer() {
       error: "API endpoint not found", 
       path: req.url,
       method: req.method 
+    });
+  });
+
+  // Global error handler for API routes
+  app.use("/api/*", (err: any, req: any, res: any, next: any) => {
+    console.error("Unhandled API Error:", err);
+    res.status(err.status || 500).json({
+      error: err.message || "Internal Server Error"
     });
   });
 
