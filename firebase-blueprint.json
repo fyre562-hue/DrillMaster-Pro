@@ -1,0 +1,110 @@
+{
+  "entities": {
+    "Competition": {
+      "title": "Competition",
+      "description": "A drill competition with teams and events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "date": { "type": "string" },
+        "pin": { "type": "string" },
+        "teams": {
+          "type": "array",
+          "items": { "$ref": "Team" }
+        },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "Event" }
+        }
+      },
+      "required": ["id", "name", "date", "pin"]
+    },
+    "Team": {
+      "title": "Team",
+      "description": "A school team participating in a competition.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolName": { "type": "string" },
+        "teamName": { "type": "string" },
+        "division": { "type": "string" }
+      },
+      "required": ["id", "schoolName", "teamName", "division"]
+    },
+    "Event": {
+      "title": "Event",
+      "description": "A specific drill event in a competition.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "commands": {
+          "type": "array",
+          "items": { "$ref": "Command" }
+        },
+        "penalties": {
+          "type": "array",
+          "items": { "$ref": "Penalty" }
+        },
+        "enrolledTeamIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["id", "name"]
+    },
+    "Command": {
+      "title": "Command",
+      "description": "A specific command to be judged.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "maxPoints": { "type": "number" }
+      },
+      "required": ["id", "text", "maxPoints"]
+    },
+    "Penalty": {
+      "title": "Penalty",
+      "description": "A penalty that can be applied.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "deduction": { "type": "number" }
+      },
+      "required": ["id", "name", "deduction"]
+    },
+    "ScoreSubmission": {
+      "title": "ScoreSubmission",
+      "description": "A judge's score for a specific team and event.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "competitionId": { "type": "string" },
+        "eventId": { "type": "string" },
+        "teamId": { "type": "string" },
+        "judgeId": { "type": "string" },
+        "scores": { "type": "object" },
+        "penaltiesApplied": { "type": "object" },
+        "reportIn": { "type": "number" },
+        "reportOut": { "type": "number" },
+        "technicalImpression": { "type": "number" },
+        "precisionImpression": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "competitionId", "eventId", "teamId", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/competitions/{competitionId}": {
+      "schema": "Competition",
+      "description": "Stores competition data."
+    },
+    "/submissions/{submissionId}": {
+      "schema": "ScoreSubmission",
+      "description": "Stores judge submissions."
+    }
+  }
+}
